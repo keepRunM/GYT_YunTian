@@ -1,11 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Text;
 using System.Web;
 using System.Web.Mvc;
-using Castle.Core.Internal;
 using Zer.AppServices;
 using Zer.Entities;
 using Zer.Framework.Attributes;
@@ -38,6 +35,7 @@ namespace com.gyt.ms.Controllers
             _truckInfoService = truckInfoService;
         }
 
+        #region 折叠  
         [UserActionLog("LNG补贴信息首页", ActionType.查询)]
         [Route("{filter?}")]
         public ActionResult Index(LngAllowanceSearchDto filter = null)
@@ -79,6 +77,7 @@ namespace com.gyt.ms.Controllers
             _lngAllowanceService.AddDescription(id, desc);
             return Success();
         }
+        #endregion
 
         //Todo: 建议优化检查检查重复业务逻辑
         [HttpPost]
@@ -96,11 +95,43 @@ namespace com.gyt.ms.Controllers
 
             if (lngAllowanceInfoDtoList.IsNullOrEmpty()) throw new Exception("没有从文件中读取到任何数据，导入失败，请重试!");
 
-            var sessionCode = AppendObjectToSession(lngAllowanceInfoDtoList);
-            var failedMessageListCode = AppendObjectToSession(failedMessageList);
+            //var sessionCode = AppendObjectToSession(lngAllowanceInfoDtoList);
+            //var failedMessageListCode = AppendObjectToSession(failedMessageList);
 
-            return RedirectToAction("SaveLngAllowanceData", "LngAllowance",
-                new { id = sessionCode, errorMessageCode = failedMessageListCode });
+            //return RedirectToAction("SaveLngAllowanceData", "LngAllowance",
+            //    new { id = sessionCode, errorMessageCode = failedMessageListCode });
+            var existsLngAllowanceInfoDtoList=new List<LngAllowanceInfoDto>();
+            var existsLngAllowanceInfoDtoListFromDB = new List<LngAllowanceInfoDto>();
+            GetNoExistsLngInfoDtoList(ref lngAllowanceInfoDtoList,out existsLngAllowanceInfoDtoList);
+           
+                GetNoExistsLngInfoDtoListFromDb(ref lngAllowanceInfoDtoList, out existsLngAllowanceInfoDtoListFromDB);
+            existsLngAllowanceInfoDtoList.AddRange(existsLngAllowanceInfoDtoListFromDB);
+            var mustImportLngAllowanceInfoDtoList = lngAllowanceInfoDtoList;
+            // 初始化检测并注册其中的新公司信息
+            var companyInfoDtoList = InitCompanyInfoDtoList(mustImportLngAllowanceInfoDtoList);
+
+            var dic = mustImportLngAllowanceInfoDtoList.Select(x => new { x.TruckNo, x.CompanyId }).Distinct()
+                .ToDictionary(x => x.TruckNo, v => v.CompanyId);
+
+            // 初始化检测并注册其中的新车辆信息
+            InitTruckInfoDtoList(dic, companyInfoDtoList);
+
+            // 保存LNG补贴信息，并得到保存成功的结果
+            var importSuccessList = _lngAllowanceService.AddRange(mustImportLngAllowanceInfoDtoList);
+
+            var importFailedList = mustImportLngAllowanceInfoDtoList.Where(x => importSuccessList.Contains(x))
+                .ToList();
+
+            // 展示导入结果
+            ViewBag.SuccessCode = AppendObjectToSession(importSuccessList);
+            ViewBag.FailedCode = AppendObjectToSession(importFailedList);
+            ViewBag.ExistedCode = AppendObjectToSession(existsLngAllowanceInfoDtoList);
+
+            ViewBag.SuccessList = importSuccessList;
+            ViewBag.FailedList = importFailedList;
+            ViewBag.ExistedList = existsLngAllowanceInfoDtoList;
+            ViewBag.errorMessageCode = failedMessageList;
+            return View("ImportResult");
         }
 
         [ReplaceSpecialCharInParameter("-", "_")]
@@ -173,6 +204,104 @@ namespace com.gyt.ms.Controllers
             return list;
         }
 
+        public void GetNoExistsLngInfoDtoList(ref List<LngAllowanceInfoDto> lngAllowanceInfoDtoList,
+               out List<LngAllowanceInfoDto> existsLngInfoDtoList)
+        {
+            existsLngInfoDtoList = new List<LngAllowanceInfoDto>();
+            var noTruckExistsLngInfoDtoList = new List<LngAllowanceInfoDto>();
+            
+            var engineIdIsNullList = lngAllowanceInfoDtoList.Where(x => string.IsNullOrEmpty(x.EngineId)).ToList();
+            var engineIdIsNotNullList = lngAllowanceInfoDtoList.Where(x => !string.IsNullOrEmpty(x.EngineId)).ToList();
+
+            if (engineIdIsNullList.Count > 0)
+            {
+                var enumerable = engineIdIsNullList.GroupBy(x => x.TruckNo).Where(g => g.Count() > 1).ToList();
+                if (enumerable.Count > 0)
+                {
+                    foreach (var item in enumerable)
+                    {
+                        noTruckExistsLngInfoDtoList.Add(engineIdIsNullList.FirstOrDefault(x => x.TruckNo == item.Key));
+                    }
+                }
+
+                var ontTruckList = engineIdIsNullList.GroupBy(x => x.TruckNo).Where(g => g.Count() == 1).ToList();
+                if (ontTruckList.Count > 0)
+                {
+                    foreach (var item in ontTruckList)
+                    {
+                        noTruckExistsLngInfoDtoList.Add(engineIdIsNullList.FirstOrDefault(x => x.TruckNo == item.Key));
+                    }
+                }
+            }
+
+            if (engineIdIsNotNullList.Count > 0)
+            {
+                var enumerable = engineIdIsNotNullList.GroupBy(x => x.TruckNo).Where(g => g.Count() > 1).ToList();
+
+                if (enumerable.Count > 0)
+                {
+                    foreach (var item in enumerable)
+                    {
+                        noTruckExistsLngInfoDtoList.Add(engineIdIsNotNullList.FirstOrDefault(x => x.TruckNo == item.Key));
+                    }
+                }
+
+                var ontTruckList = engineIdIsNotNullList.GroupBy(x => x.TruckNo).Where(g => g.Count() == 1).ToList();
+                if (ontTruckList.Count > 0)
+                {
+                    foreach (var item in ontTruckList)
+                    {
+                        noTruckExistsLngInfoDtoList.Add(engineIdIsNotNullList.FirstOrDefault(x => x.TruckNo == item.Key));
+                    }
+                }
+
+            }
+
+            if (noTruckExistsLngInfoDtoList.Count > 0)
+            {
+                existsLngInfoDtoList = noTruckExistsLngInfoDtoList.Where(x => string.IsNullOrEmpty(x.EngineId)).ToList();
+                var list = noTruckExistsLngInfoDtoList.Where(x => !string.IsNullOrEmpty(x.EngineId)).ToList();
+                if (list.Count > 0)
+                {
+                    var enumerable = list.GroupBy(x => x.EngineId).Where(g => g.Count() > 1).ToList();
+                    if (enumerable.Count > 0)
+                    {
+                        foreach (var item in enumerable)
+                        {
+                            lngAllowanceInfoDtoList.Add(list.FirstOrDefault(x => x.EngineId == item.Key));
+                        }
+                    }
+
+                    enumerable = list.GroupBy(x => x.EngineId).Where(g => g.Count() == 1).ToList();
+                    if (enumerable.Count > 0)
+                    {
+                        foreach (var item in enumerable)
+                        {
+                            lngAllowanceInfoDtoList.Add(list.FirstOrDefault(x => x.EngineId == item.Key));
+                        }
+                    }
+                }
+            }
+
+            lngAllowanceInfoDtoList.AddRange(existsLngInfoDtoList);
+            existsLngInfoDtoList = lngAllowanceInfoDtoList.Except(lngAllowanceInfoDtoList).ToList();
+        }
+
+        public  void GetNoExistsLngInfoDtoListFromDb(ref List<LngAllowanceInfoDto> lngAllowanceInfoDtoList,
+            out List<LngAllowanceInfoDto> existsLngInfoDtoList)
+        {
+            existsLngInfoDtoList = new List<LngAllowanceInfoDto>();
+
+            if (lngAllowanceInfoDtoList.Count>0)
+            {
+                lngAllowanceInfoDtoList.AddRange(lngAllowanceInfoDtoList.Where(item => _lngAllowanceService.Exists(item)));
+            }
+
+            lngAllowanceInfoDtoList = existsLngInfoDtoList.Count > 0 ? lngAllowanceInfoDtoList.Except(existsLngInfoDtoList).ToList() : lngAllowanceInfoDtoList;
+            
+        }
+
+        #region 折叠
         [HttpPost]
         [Route("addpost")]
         [ReplaceSpecialCharInParameter("-", "_")]
@@ -315,6 +444,6 @@ namespace com.gyt.ms.Controllers
             // 注册新增车辆信息
             _truckInfoService.QueryAfterValidateAndRegist(waitForValidateTruckList);
         }
-
+        #endregion
     }
 }
